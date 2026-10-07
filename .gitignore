@@ -1,0 +1,81 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Visual Studio Code
+.vscode/
+
+# Rider / JetBrains
+.idea/
+*.sln.iml
+
+# User-specific files
+*.user
+*.rsuser
+
+# Logs
+*.log
+
+# Test results
+TestResults/
+*.trx
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+.nuget/
+
+# ASP.NET Core
+wwwroot/dist/
+wwwroot/node_modules/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# User secrets
+secrets.json
+
+# Local configuration
+appsettings.Local.json
+appsettings.Development.local.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+
+# Coverage
+coverage/
+*.coverage
+*.coveragexml
+
+# Temporary files
+*.tmp
+*.temp
+
+# Publish output
+publish/
+*.publishsettings
+
+# Docker
+docker-compose.override.yml
+
+# Azure
+*.publish.xml
+
+# Generated files
+Generated/

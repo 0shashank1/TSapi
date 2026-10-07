@@ -1,0 +1,34 @@
+
+dotnet new sln -n TS
+
+mkdir src tests
+
+dotnet new classlib -n TS.Domain -o src/TS.Domain
+dotnet new classlib -n TS.Application -o src/TS.Application
+dotnet new classlib -n TS.Infrastructure -o src/TS.Infrastructure
+dotnet new webapi -n TS.Api -o src/TS.Api
+
+dotnet new xunit -n TS.UnitTests -o tests/TS.UnitTests
+dotnet new xunit -n TS.IntegrationTests -o tests/TS.IntegrationTests
+
+dotnet sln add src/TS.Domain
+dotnet sln add src/TS.Application
+dotnet sln add src/TS.Infrastructure
+dotnet sln add src/TS.Api
+
+dotnet sln add tests/TS.UnitTests
+dotnet sln add tests/TS.IntegrationTests
+
+dotnet add src/TS.Application reference src/TS.Domain
+
+dotnet add src/TS.Infrastructure reference src/TS.Application
+dotnet add src/TS.Infrastructure reference src/TS.Domain
+
+dotnet add src/TS.Api reference src/TS.Application
+dotnet add src/TS.Api reference src/TS.Infrastructure
+
+
+dotnet add tests/TS.UnitTests reference src/TS.Application
+dotnet add tests/TS.UnitTests reference src/TS.Domain
+
+dotnet add tests/TS.IntegrationTests reference src/TS.Api
