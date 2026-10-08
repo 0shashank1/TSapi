@@ -27,9 +27,11 @@ public sealed class JwtTokenService : IJwtTokenService
         }
     }
 
-    public string GenerateAccessToken(User user)
+    public AccessToken GenerateAccessToken(User user)
     {
         var now = DateTime.UtcNow;
+        var expiresAtUtc = now.AddMinutes(
+            _options.AccessTokenMinutes);
 
         var claims = new List<Claim>
         {
@@ -55,11 +57,12 @@ public sealed class JwtTokenService : IJwtTokenService
             audience: _options.Audience,
             claims: claims,
             notBefore: now,
-            expires: now.AddMinutes(
-                _options.AccessTokenMinutes),
+            expires: expiresAtUtc,
             signingCredentials: credentials);
 
-        return new JwtSecurityTokenHandler()
+        var written = new JwtSecurityTokenHandler()
             .WriteToken(token);
+
+        return new AccessToken(written, expiresAtUtc);
     }
 }

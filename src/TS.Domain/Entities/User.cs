@@ -63,4 +63,28 @@ public sealed class User : EntityBase
         IsActive = false;
         Touch(utcNow);
     }
+
+    public void Activate(DateTime utcNow)
+    {
+        IsActive = true;
+        Touch(utcNow);
+    }
+
+    public void UpdateProfile(string? displayName, DateTime utcNow)
+    {
+        DisplayName = displayName;
+        Touch(utcNow);
+    }
+
+    public void ChangePassword(string newPasswordHash, DateTime utcNow)
+    {
+        PasswordHash = newPasswordHash;
+        Touch(utcNow);
+    }
+
+    public void SetRole(UserRole role, DateTime utcNow)
+    {
+        Role = role;
+        Touch(utcNow);
+    }
 }

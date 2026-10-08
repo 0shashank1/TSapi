@@ -33,7 +33,7 @@ public sealed class ShareAccessLogConfiguration
 
         builder.Property(x => x.IpAddress)
             .HasColumnName("ip_address")
-            .HasColumnType("inet");
+            .HasMaxLength(45);
 
         builder.Property(x => x.UserAgent)
             .HasColumnName("user_agent")
