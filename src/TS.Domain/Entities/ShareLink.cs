@@ -101,4 +101,15 @@ public sealed class ShareLink : EntityBase
 
         Touch(utcNow);
     }
+
+    public void UpdatePolicy(
+        DateTime? expiresAtUtc,
+        int? maxUses,
+        DateTime utcNow)
+    {
+        ExpiresAtUtc = expiresAtUtc;
+        MaxUses = maxUses;
+
+        Touch(utcNow);
+    }
 }
