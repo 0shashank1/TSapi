@@ -1,22 +1,33 @@
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using TS.Application.Common;
 using TS.Application.DTOs.Admin;
 using TS.Application.Interfaces;
-using TS.Domain.Entities;
 using TS.Domain.Enums;
-using TS.Infrastructure.Persistence;
 
 namespace TS.Infrastructure.Services;
 
 public sealed class AdminService : IAdminService
 {
-    private readonly TSDbContext _db;
+    private readonly IUserRepository _users;
+    private readonly ISnippetRepository _snippets;
+    private readonly IRefreshTokenRepository _refreshTokens;
+    private readonly IShareAccessLogRepository _accessLogs;
+    private readonly IUnitOfWork _unitOfWork;
     private readonly ILogger<AdminService> _logger;
 
-    public AdminService(TSDbContext db, ILogger<AdminService> logger)
+    public AdminService(
+        IUserRepository users,
+        ISnippetRepository snippets,
+        IRefreshTokenRepository refreshTokens,
+        IShareAccessLogRepository accessLogs,
+        IUnitOfWork unitOfWork,
+        ILogger<AdminService> logger)
     {
-        _db = db;
+        _users = users;
+        _snippets = snippets;
+        _refreshTokens = refreshTokens;
+        _accessLogs = accessLogs;
+        _unitOfWork = unitOfWork;
         _logger = logger;
     }
 
@@ -24,50 +35,17 @@ public sealed class AdminService : IAdminService
         AdminUserListQuery query,
         CancellationToken cancellationToken = default)
     {
-        IQueryable<User> source = _db.Users.AsNoTracking();
+        var isActive = ParseStatus(query.Status);
+        var role = ParseRole(query.Role);
+        var cursor = ParseDateCursor(query.Cursor);
 
-        if (!string.IsNullOrWhiteSpace(query.Search))
-        {
-            var term = query.Search.Trim();
-            source = source.Where(u =>
-                u.Email.Contains(term) ||
-                (u.DisplayName != null && u.DisplayName.Contains(term)));
-        }
-
-        var status = query.Status?.Trim().ToLowerInvariant();
-        source = status switch
-        {
-            null or "" or "all" => source,
-            "active" => source.Where(u => u.IsActive),
-            "inactive" => source.Where(u => !u.IsActive),
-            _ => throw InvalidFilter(
-                "status", "Must be one of: active, inactive, all.")
-        };
-
-        var role = query.Role?.Trim().ToLowerInvariant();
-        source = role switch
-        {
-            null or "" or "all" => source,
-            "user" => source.Where(u => u.Role == UserRole.User),
-            "admin" => source.Where(u => u.Role == UserRole.Admin),
-            _ => throw InvalidFilter("role", "Must be one of: user, admin.")
-        };
-
-        if (!string.IsNullOrWhiteSpace(query.Cursor))
-        {
-            if (!TryDecodeCursor(query.Cursor, out var lastCreatedAt, out var lastId))
-                throw InvalidCursor();
-
-            source = source.Where(u =>
-                u.CreatedAtUtc < lastCreatedAt ||
-                (u.CreatedAtUtc == lastCreatedAt && u.Id.CompareTo(lastId) < 0));
-        }
-
-        var rows = await source
-            .OrderByDescending(u => u.CreatedAtUtc)
-            .ThenByDescending(u => u.Id)
-            .Take(query.PageSize + 1)
-            .ToListAsync(cancellationToken);
+        var rows = await _users.SearchAsync(
+            query.Search,
+            isActive,
+            role,
+            cursor,
+            query.PageSize + 1,
+            cancellationToken);
 
         var hasMore = rows.Count > query.PageSize;
         if (hasMore)
@@ -89,23 +67,22 @@ public sealed class AdminService : IAdminService
         Guid userId,
         CancellationToken cancellationToken = default)
     {
-        var user = await _db.Users
-            .AsNoTracking()
-            .FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+        var user = await _users.GetByIdAsNoTrackingAsync(
+            userId,
+            cancellationToken);
 
         if (user is null)
             throw new NotFoundException("User not found.");
 
         var now = DateTime.UtcNow;
 
-        var snippetCount = await _db.TextSnippets.CountAsync(
-            s => s.OwnerUserId == userId,
+        var snippetCount = await _snippets.CountByOwnerAsync(
+            userId,
             cancellationToken);
 
-        var activeRefreshTokenCount = await _db.RefreshTokens.CountAsync(
-            t => t.UserId == userId &&
-                 t.RevokedAtUtc == null &&
-                 t.ExpiresAtUtc > now,
+        var activeRefreshTokenCount = await _refreshTokens.CountActiveAsync(
+            userId,
+            now,
             cancellationToken);
 
         return AdminUserResponse.From(user, snippetCount, activeRefreshTokenCount);
@@ -117,8 +94,7 @@ public sealed class AdminService : IAdminService
         string? ipAddress,
         CancellationToken cancellationToken = default)
     {
-        var user = await _db.Users
-            .FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+        var user = await _users.GetByIdAsync(userId, cancellationToken);
 
         if (user is null)
             throw new NotFoundException("User not found.");
@@ -129,9 +105,9 @@ public sealed class AdminService : IAdminService
         {
             user.Deactivate(now);
 
-            var activeTokens = await _db.RefreshTokens
-                .Where(t => t.UserId == userId && t.RevokedAtUtc == null)
-                .ToListAsync(cancellationToken);
+            var activeTokens = await _refreshTokens.ListActiveByUserAsync(
+                userId,
+                cancellationToken);
 
             foreach (var token in activeTokens)
             {
@@ -153,7 +129,7 @@ public sealed class AdminService : IAdminService
                 now);
         }
 
-        await _db.SaveChangesAsync(cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
     }
 
     public async Task SetRoleAsync(
@@ -161,18 +137,13 @@ public sealed class AdminService : IAdminService
         AdminUserRoleRequest request,
         CancellationToken cancellationToken = default)
     {
-        var user = await _db.Users
-            .FirstOrDefaultAsync(u => u.Id == userId, cancellationToken);
+        var user = await _users.GetByIdAsync(userId, cancellationToken);
 
         if (user is null)
             throw new NotFoundException("User not found.");
 
-        var role = request.Role.Trim().ToLowerInvariant() switch
-        {
-            "user" => UserRole.User,
-            "admin" => UserRole.Admin,
-            _ => throw InvalidFilter("role", "Must be one of: user, admin.")
-        };
+        var role = ParseRole(request.Role)
+            ?? throw InvalidFilter("role", "Must be one of: user, admin.");
 
         if (user.Role != role)
         {
@@ -185,7 +156,7 @@ public sealed class AdminService : IAdminService
                 role,
                 DateTime.UtcNow);
 
-            await _db.SaveChangesAsync(cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
     }
 
@@ -193,44 +164,16 @@ public sealed class AdminService : IAdminService
         AccessLogQuery query,
         CancellationToken cancellationToken = default)
     {
-        IQueryable<ShareAccessLog> source = _db.ShareAccessLogs.AsNoTracking();
+        var cursor = ParseDateCursor(query.Cursor);
 
-        if (query.Success.HasValue)
-            source = source.Where(l => l.WasSuccessful == query.Success.Value);
-
-        if (!string.IsNullOrWhiteSpace(query.Reason))
-        {
-            var reason = query.Reason.Trim();
-            source = source.Where(l => l.FailureReason == reason);
-        }
-
-        if (query.From.HasValue)
-        {
-            var from = query.From.Value.ToUniversalTime();
-            source = source.Where(l => l.AccessedAtUtc >= from);
-        }
-
-        if (query.To.HasValue)
-        {
-            var to = query.To.Value.ToUniversalTime();
-            source = source.Where(l => l.AccessedAtUtc < to);
-        }
-
-        if (!string.IsNullOrWhiteSpace(query.Cursor))
-        {
-            if (!TryDecodeCursor(query.Cursor, out var lastAccessedAt, out var lastId))
-                throw InvalidCursor();
-
-            source = source.Where(l =>
-                l.AccessedAtUtc < lastAccessedAt ||
-                (l.AccessedAtUtc == lastAccessedAt && l.Id.CompareTo(lastId) < 0));
-        }
-
-        var rows = await source
-            .OrderByDescending(l => l.AccessedAtUtc)
-            .ThenByDescending(l => l.Id)
-            .Take(query.PageSize + 1)
-            .ToListAsync(cancellationToken);
+        var rows = await _accessLogs.SearchAsync(
+            query.Success,
+            query.Reason,
+            query.From,
+            query.To,
+            cursor,
+            query.PageSize + 1,
+            cancellationToken);
 
         var hasMore = rows.Count > query.PageSize;
         if (hasMore)
@@ -252,38 +195,15 @@ public sealed class AdminService : IAdminService
         RefreshTokenQuery query,
         CancellationToken cancellationToken = default)
     {
-        IQueryable<RefreshToken> source = _db.RefreshTokens.AsNoTracking();
+        var status = ParseTokenStatus(query.Status);
+        var cursor = ParseDateCursor(query.Cursor);
 
-        if (query.UserId.HasValue)
-            source = source.Where(t => t.UserId == query.UserId.Value);
-
-        var status = query.Status?.Trim().ToLowerInvariant();
-        var now = DateTime.UtcNow;
-        source = status switch
-        {
-            null or "" or "all" => source,
-            "active" => source.Where(
-                t => t.RevokedAtUtc == null && t.ExpiresAtUtc > now),
-            "revoked" => source.Where(t => t.RevokedAtUtc != null),
-            _ => throw InvalidFilter(
-                "status", "Must be one of: active, revoked, all.")
-        };
-
-        if (!string.IsNullOrWhiteSpace(query.Cursor))
-        {
-            if (!TryDecodeCursor(query.Cursor, out var lastCreatedAt, out var lastId))
-                throw InvalidCursor();
-
-            source = source.Where(t =>
-                t.CreatedAtUtc < lastCreatedAt ||
-                (t.CreatedAtUtc == lastCreatedAt && t.Id.CompareTo(lastId) < 0));
-        }
-
-        var rows = await source
-            .OrderByDescending(t => t.CreatedAtUtc)
-            .ThenByDescending(t => t.Id)
-            .Take(query.PageSize + 1)
-            .ToListAsync(cancellationToken);
+        var rows = await _refreshTokens.SearchAsync(
+            query.UserId,
+            status,
+            cursor,
+            query.PageSize + 1,
+            cancellationToken);
 
         var hasMore = rows.Count > query.PageSize;
         if (hasMore)
@@ -301,24 +221,56 @@ public sealed class AdminService : IAdminService
             nextCursor);
     }
 
-    private static bool TryDecodeCursor(
-        string cursor,
-        out DateTime sortValue,
-        out Guid id)
+    private static bool? ParseStatus(string? status)
     {
-        sortValue = default;
-        id = default;
+        var normalized = status?.Trim().ToLowerInvariant();
 
-        if (!Cursor.TryDecodeString(cursor, out var raw, out id) ||
-            !long.TryParse(raw, out var ticks) ||
-            ticks < DateTime.MinValue.Ticks ||
-            ticks > DateTime.MaxValue.Ticks)
+        return normalized switch
         {
-            return false;
-        }
+            null or "" or "all" => null,
+            "active" => true,
+            "inactive" => false,
+            _ => throw InvalidFilter(
+                "status", "Must be one of: active, inactive, all.")
+        };
+    }
 
-        sortValue = new DateTime(ticks, DateTimeKind.Utc);
-        return true;
+    private static UserRole? ParseRole(string? role)
+    {
+        var normalized = role?.Trim().ToLowerInvariant();
+
+        return normalized switch
+        {
+            null or "" or "all" => null,
+            "user" => UserRole.User,
+            "admin" => UserRole.Admin,
+            _ => throw InvalidFilter("role", "Must be one of: user, admin.")
+        };
+    }
+
+    private static RefreshTokenStatus ParseTokenStatus(string? status)
+    {
+        var normalized = status?.Trim().ToLowerInvariant();
+
+        return normalized switch
+        {
+            null or "" or "all" => RefreshTokenStatus.All,
+            "active" => RefreshTokenStatus.Active,
+            "revoked" => RefreshTokenStatus.Revoked,
+            _ => throw InvalidFilter(
+                "status", "Must be one of: active, revoked, all.")
+        };
+    }
+
+    private static DateKeyset? ParseDateCursor(string? cursor)
+    {
+        if (string.IsNullOrWhiteSpace(cursor))
+            return null;
+
+        if (!Cursor.TryDecodeDateTime(cursor, out var sortValue, out var id))
+            throw InvalidCursor();
+
+        return new DateKeyset(sortValue, id);
     }
 
     private static ValidationException InvalidFilter(string field, string message)

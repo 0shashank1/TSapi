@@ -1,6 +1,8 @@
+using TS.Domain.Common;
+
 namespace TS.Domain.Entities;
 
-public sealed class ShareAccessLog
+public sealed class ShareAccessLog : IEntity
 {
     private ShareAccessLog()
     {

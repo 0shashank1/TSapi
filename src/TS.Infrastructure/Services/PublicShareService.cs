@@ -1,30 +1,34 @@
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using TS.Application.Common;
 using TS.Application.DTOs.Public;
 using TS.Application.Interfaces;
 using TS.Domain.Entities;
-using TS.Infrastructure.Persistence;
 using TS.Infrastructure.Security;
 
 namespace TS.Infrastructure.Services;
 
 public sealed class PublicShareService : IPublicShareService
 {
-    private readonly TSDbContext _db;
+    private readonly IShareLinkRepository _shareLinks;
+    private readonly IShareAccessLogRepository _accessLogs;
+    private readonly IUnitOfWork _unitOfWork;
     private readonly IShareCodeService _shareCodeService;
     private readonly IShareAccessTokenService _shareAccessTokenService;
     private readonly IPasswordHasher _passwordHasher;
     private readonly ShareCodeOptions _shareCodeOptions;
 
     public PublicShareService(
-        TSDbContext db,
+        IShareLinkRepository shareLinks,
+        IShareAccessLogRepository accessLogs,
+        IUnitOfWork unitOfWork,
         IShareCodeService shareCodeService,
         IShareAccessTokenService shareAccessTokenService,
         IPasswordHasher passwordHasher,
         IOptions<ShareCodeOptions> shareCodeOptions)
     {
-        _db = db;
+        _shareLinks = shareLinks;
+        _accessLogs = accessLogs;
+        _unitOfWork = unitOfWork;
         _shareCodeService = shareCodeService;
         _shareAccessTokenService = shareAccessTokenService;
         _passwordHasher = passwordHasher;
@@ -96,7 +100,7 @@ public sealed class PublicShareService : IPublicShareService
         link.RecordAccess(now);
         link.TextSnippet.RecordView(now);
 
-        _db.ShareAccessLogs.Add(new ShareAccessLog(
+        _accessLogs.Add(new ShareAccessLog(
             link.Id,
             null,
             now,
@@ -105,7 +109,7 @@ public sealed class PublicShareService : IPublicShareService
             userAgent,
             null));
 
-        await _db.SaveChangesAsync(cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         var snippet = link.TextSnippet;
 
@@ -157,7 +161,7 @@ public sealed class PublicShareService : IPublicShareService
         var accessToken = _shareAccessTokenService.Generate(link.Id);
         var expiresAtUtc = now.AddMinutes(_shareCodeOptions.UnlockTokenMinutes);
 
-        _db.ShareAccessLogs.Add(new ShareAccessLog(
+        _accessLogs.Add(new ShareAccessLog(
             link.Id,
             null,
             now,
@@ -166,7 +170,7 @@ public sealed class PublicShareService : IPublicShareService
             userAgent,
             null));
 
-        await _db.SaveChangesAsync(cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         return new UnlockResponse(accessToken, expiresAtUtc);
     }
@@ -184,12 +188,10 @@ public sealed class PublicShareService : IPublicShareService
         {
             var hash = _shareCodeService.HashCode(code, version);
 
-            var link = await _db.ShareLinks
-                .Include(l => l.TextSnippet)
-                .FirstOrDefaultAsync(
-                    l => l.TokenKeyVersion == version &&
-                         l.TokenHash == hash,
-                    cancellationToken);
+            var link = await _shareLinks.FindByTokenAsync(
+                version,
+                hash,
+                cancellationToken);
 
             if (link is not null)
                 return link;
@@ -205,7 +207,7 @@ public sealed class PublicShareService : IPublicShareService
         string failureReason,
         CancellationToken cancellationToken)
     {
-        _db.ShareAccessLogs.Add(new ShareAccessLog(
+        _accessLogs.Add(new ShareAccessLog(
             shareLinkId,
             null,
             DateTime.UtcNow,
@@ -214,6 +216,6 @@ public sealed class PublicShareService : IPublicShareService
             userAgent,
             failureReason));
 
-        await _db.SaveChangesAsync(cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
     }
 }
