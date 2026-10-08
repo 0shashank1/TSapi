@@ -3,6 +3,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using TS.Application.Interfaces;
 using TS.Infrastructure.Persistence;
+using TS.Infrastructure.Persistence.Repositories;
 using TS.Infrastructure.Security;
 using TS.Infrastructure.Services;
 
@@ -29,6 +30,14 @@ public static class DependencyInjection
         services.AddScoped<IRefreshTokenGenerator, RefreshTokenGenerator>();
         services.AddScoped<IShareCodeService, ShareCodeService>();
         services.AddScoped<IShareAccessTokenService, ShareAccessTokenService>();
+
+        services.AddScoped(typeof(IRepository<>), typeof(EfRepository<>));
+        services.AddScoped<IUnitOfWork, UnitOfWork>();
+        services.AddScoped<IUserRepository, UserRepository>();
+        services.AddScoped<ISnippetRepository, SnippetRepository>();
+        services.AddScoped<IShareLinkRepository, ShareLinkRepository>();
+        services.AddScoped<IRefreshTokenRepository, RefreshTokenRepository>();
+        services.AddScoped<IShareAccessLogRepository, ShareAccessLogRepository>();
 
         services.AddScoped<IAuthService, AuthService>();
         services.AddScoped<IUserService, UserService>();

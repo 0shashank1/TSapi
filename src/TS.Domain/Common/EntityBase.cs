@@ -1,6 +1,6 @@
 namespace TS.Domain.Common;
 
-public abstract class EntityBase
+public abstract class EntityBase : IEntity
 {
     public Guid Id { get; protected set; } = Guid.NewGuid();
 

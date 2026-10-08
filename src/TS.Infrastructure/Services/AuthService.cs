@@ -1,31 +1,35 @@
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using TS.Application.Common;
 using TS.Application.DTOs.Auth;
 using TS.Application.DTOs.Users;
 using TS.Application.Interfaces;
 using TS.Domain.Entities;
-using TS.Infrastructure.Persistence;
 using TS.Infrastructure.Security;
 
 namespace TS.Infrastructure.Services;
 
 public sealed class AuthService : IAuthService
 {
-    private readonly TSDbContext _db;
+    private readonly IUserRepository _users;
+    private readonly IRefreshTokenRepository _refreshTokens;
+    private readonly IUnitOfWork _unitOfWork;
     private readonly IPasswordHasher _passwordHasher;
     private readonly IJwtTokenService _jwtTokenService;
     private readonly IRefreshTokenGenerator _refreshTokenGenerator;
     private readonly JwtOptions _jwtOptions;
 
     public AuthService(
-        TSDbContext db,
+        IUserRepository users,
+        IRefreshTokenRepository refreshTokens,
+        IUnitOfWork unitOfWork,
         IPasswordHasher passwordHasher,
         IJwtTokenService jwtTokenService,
         IRefreshTokenGenerator refreshTokenGenerator,
         IOptions<JwtOptions> jwtOptions)
     {
-        _db = db;
+        _users = users;
+        _refreshTokens = refreshTokens;
+        _unitOfWork = unitOfWork;
         _passwordHasher = passwordHasher;
         _jwtTokenService = jwtTokenService;
         _refreshTokenGenerator = refreshTokenGenerator;
@@ -41,8 +45,8 @@ public sealed class AuthService : IAuthService
         var email = request.Email.Trim();
         var normalizedEmail = NormalizeEmail(email);
 
-        var emailTaken = await _db.Users.AnyAsync(
-            u => u.NormalizedEmail == normalizedEmail,
+        var emailTaken = await _users.EmailExistsAsync(
+            normalizedEmail,
             cancellationToken);
 
         if (emailTaken)
@@ -63,9 +67,9 @@ public sealed class AuthService : IAuthService
 
         var accessToken = _jwtTokenService.GenerateAccessToken(user);
 
-        _db.Users.Add(user);
-        _db.RefreshTokens.Add(refreshToken);
-        await _db.SaveChangesAsync(cancellationToken);
+        _users.Add(user);
+        _refreshTokens.Add(refreshToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         return new AuthResponse(
             UserSummary.From(user),
@@ -82,8 +86,8 @@ public sealed class AuthService : IAuthService
     {
         var normalizedEmail = NormalizeEmail(request.Email);
 
-        var user = await _db.Users.FirstOrDefaultAsync(
-            u => u.NormalizedEmail == normalizedEmail,
+        var user = await _users.FindByNormalizedEmailAsync(
+            normalizedEmail,
             cancellationToken);
 
         // Deliberately generic: never reveal whether the account exists.
@@ -102,8 +106,8 @@ public sealed class AuthService : IAuthService
 
         var accessToken = _jwtTokenService.GenerateAccessToken(user);
 
-        _db.RefreshTokens.Add(refreshToken);
-        await _db.SaveChangesAsync(cancellationToken);
+        _refreshTokens.Add(refreshToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         return new AuthResponse(
             UserSummary.From(user),
@@ -120,11 +124,9 @@ public sealed class AuthService : IAuthService
     {
         var tokenHash = _refreshTokenGenerator.Hash(refreshToken);
 
-        var token = await _db.RefreshTokens
-            .Include(t => t.User)
-            .FirstOrDefaultAsync(
-                t => t.TokenHash == tokenHash,
-                cancellationToken);
+        var token = await _refreshTokens.FindByTokenHashWithUserAsync(
+            tokenHash,
+            cancellationToken);
 
         if (token is null)
             throw new UnauthorizedException("Invalid refresh token.");
@@ -135,17 +137,16 @@ public sealed class AuthService : IAuthService
         {
             // Reuse detection: a revoked token was presented again,
             // so the whole family is considered compromised.
-            var family = await _db.RefreshTokens
-                .Where(t => t.FamilyId == token.FamilyId &&
-                            t.RevokedAtUtc == null)
-                .ToListAsync(cancellationToken);
+            var family = await _refreshTokens.ListActiveByFamilyAsync(
+                token.FamilyId,
+                cancellationToken);
 
             foreach (var member in family)
             {
                 member.Revoke(now, "ReuseDetected", ipAddress);
             }
 
-            await _db.SaveChangesAsync(cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             throw new UnauthorizedException(
                 "Refresh token reuse detected. The session has been revoked.");
@@ -164,8 +165,8 @@ public sealed class AuthService : IAuthService
 
         var accessToken = _jwtTokenService.GenerateAccessToken(token.User);
 
-        _db.RefreshTokens.Add(replacement);
-        await _db.SaveChangesAsync(cancellationToken);
+        _refreshTokens.Add(replacement);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         return new AuthResponse(
             UserSummary.From(token.User),
@@ -181,8 +182,8 @@ public sealed class AuthService : IAuthService
     {
         var tokenHash = _refreshTokenGenerator.Hash(refreshToken);
 
-        var token = await _db.RefreshTokens.FirstOrDefaultAsync(
-            t => t.TokenHash == tokenHash,
+        var token = await _refreshTokens.FindByTokenHashAsync(
+            tokenHash,
             cancellationToken);
 
         // Idempotent: revoking an unknown or already-revoked token
@@ -190,7 +191,7 @@ public sealed class AuthService : IAuthService
         if (token is { IsRevoked: false })
         {
             token.Revoke(DateTime.UtcNow, "Logout", ipAddress);
-            await _db.SaveChangesAsync(cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
     }
 
@@ -201,16 +202,16 @@ public sealed class AuthService : IAuthService
     {
         var now = DateTime.UtcNow;
 
-        var activeTokens = await _db.RefreshTokens
-            .Where(t => t.UserId == userId && t.RevokedAtUtc == null)
-            .ToListAsync(cancellationToken);
+        var activeTokens = await _refreshTokens.ListActiveByUserAsync(
+            userId,
+            cancellationToken);
 
         foreach (var token in activeTokens)
         {
             token.Revoke(now, "LogoutAll", ipAddress);
         }
 
-        await _db.SaveChangesAsync(cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
     }
 
     private (RefreshToken Entity, string PlainToken) CreateRefreshToken(

@@ -1,19 +1,21 @@
-using Microsoft.EntityFrameworkCore;
 using TS.Application.Common;
 using TS.Application.DTOs.Snippets;
 using TS.Application.Interfaces;
 using TS.Domain.Entities;
-using TS.Infrastructure.Persistence;
 
 namespace TS.Infrastructure.Services;
 
 public sealed class SnippetService : ISnippetService
 {
-    private readonly TSDbContext _db;
+    private readonly ISnippetRepository _snippets;
+    private readonly IUnitOfWork _unitOfWork;
 
-    public SnippetService(TSDbContext db)
+    public SnippetService(
+        ISnippetRepository snippets,
+        IUnitOfWork unitOfWork)
     {
-        _db = db;
+        _snippets = snippets;
+        _unitOfWork = unitOfWork;
     }
 
     public async Task<SnippetResponse> CreateAsync(
@@ -32,8 +34,8 @@ public sealed class SnippetService : ISnippetService
             request.ExpiresAtUtc,
             request.MaxViews);
 
-        _db.TextSnippets.Add(snippet);
-        await _db.SaveChangesAsync(cancellationToken);
+        _snippets.Add(snippet);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         return SnippetResponse.From(snippet);
     }
@@ -44,47 +46,21 @@ public sealed class SnippetService : ISnippetService
         CancellationToken cancellationToken = default)
     {
         var now = DateTime.UtcNow;
-        var sortBy = (query.SortBy ?? "createdAt").Trim().ToLowerInvariant();
-        var status = (query.Status ?? "all").Trim().ToLowerInvariant();
-
-        IQueryable<TextSnippet> source = _db.TextSnippets.AsNoTracking()
-            .Where(s => s.OwnerUserId == context.UserId);
-
-        source = status switch
-        {
-            "all" => source,
-            "active" => source.Where(
-                s => s.ExpiresAtUtc == null || s.ExpiresAtUtc > now),
-            "expired" => source.Where(
-                s => s.ExpiresAtUtc != null && s.ExpiresAtUtc <= now),
-            _ => throw new ValidationException(
-                "Invalid status filter.",
-                new Dictionary<string, string[]>
-                {
-                    ["status"] = ["Must be one of: active, expired, all."]
-                })
-        };
-
-        if (!string.IsNullOrWhiteSpace(query.Search))
-        {
-            var term = query.Search.Trim();
-            source = source.Where(
-                s => (s.Title != null && s.Title.Contains(term)) ||
-                     s.Content.Contains(term));
-        }
-
+        var sortBy = ParseSortBy(query.SortBy);
+        var status = ParseStatus(query.Status);
         var descending = ResolveDescending(sortBy, query.SortDirection);
+        var cursor = ParseCursor(query.Cursor, sortBy);
 
-        if (!string.IsNullOrWhiteSpace(query.Cursor))
-        {
-            source = ApplyCursor(source, sortBy, query.Cursor, descending);
-        }
-
-        var ordered = ApplyOrdering(source, sortBy, descending);
-
-        var rows = await ordered
-            .Take(query.PageSize + 1)
-            .ToListAsync(cancellationToken);
+        var rows = await _snippets.ListOwnedAsync(
+            context.UserId,
+            now,
+            status,
+            query.Search,
+            sortBy,
+            descending,
+            cursor,
+            query.PageSize + 1,
+            cancellationToken);
 
         var hasMore = rows.Count > query.PageSize;
         if (hasMore)
@@ -96,9 +72,9 @@ public sealed class SnippetService : ISnippetService
             var last = rows[^1];
             nextCursor = sortBy switch
             {
-                "title" => Cursor.Encode(last.Title ?? string.Empty, last.Id),
-                "viewcount" => Cursor.Encode(last.ViewCount, last.Id),
-                "updatedat" => Cursor.Encode(last.UpdatedAtUtc.Ticks, last.Id),
+                SnippetSortBy.Title => Cursor.Encode(last.Title ?? string.Empty, last.Id),
+                SnippetSortBy.ViewCount => Cursor.Encode(last.ViewCount, last.Id),
+                SnippetSortBy.UpdatedAt => Cursor.Encode(last.UpdatedAtUtc.Ticks, last.Id),
                 _ => Cursor.Encode(last.CreatedAtUtc.Ticks, last.Id)
             };
         }
@@ -113,9 +89,9 @@ public sealed class SnippetService : ISnippetService
         Guid snippetId,
         CancellationToken cancellationToken = default)
     {
-        var snippet = await _db.TextSnippets
-            .AsNoTracking()
-            .FirstOrDefaultAsync(s => s.Id == snippetId, cancellationToken);
+        var snippet = await _snippets.GetByIdAsNoTrackingAsync(
+            snippetId,
+            cancellationToken);
 
         EnsureCanAccess(context, snippet);
 
@@ -129,8 +105,7 @@ public sealed class SnippetService : ISnippetService
         Guid? ifMatchVersion,
         CancellationToken cancellationToken = default)
     {
-        var snippet = await _db.TextSnippets
-            .FirstOrDefaultAsync(s => s.Id == snippetId, cancellationToken);
+        var snippet = await _snippets.GetByIdAsync(snippetId, cancellationToken);
 
         EnsureCanAccess(context, snippet);
 
@@ -161,15 +136,7 @@ public sealed class SnippetService : ISnippetService
 
         snippet!.UpdateContent(content, title, expiresAtUtc, maxViews, now);
 
-        try
-        {
-            await _db.SaveChangesAsync(cancellationToken);
-        }
-        catch (DbUpdateConcurrencyException)
-        {
-            throw new ConcurrencyConflictException(
-                "The snippet was changed by another request.");
-        }
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         return SnippetResponse.From(snippet);
     }
@@ -179,13 +146,12 @@ public sealed class SnippetService : ISnippetService
         Guid snippetId,
         CancellationToken cancellationToken = default)
     {
-        var snippet = await _db.TextSnippets
-            .FirstOrDefaultAsync(s => s.Id == snippetId, cancellationToken);
+        var snippet = await _snippets.GetByIdAsync(snippetId, cancellationToken);
 
         EnsureCanAccess(context, snippet);
 
-        _db.TextSnippets.Remove(snippet!);
-        await _db.SaveChangesAsync(cancellationToken);
+        _snippets.Remove(snippet!);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
     }
 
     private static void EnsureCanAccess(
@@ -219,7 +185,40 @@ public sealed class SnippetService : ISnippetService
         return string.IsNullOrEmpty(trimmed) ? null : trimmed;
     }
 
-    private static bool ResolveDescending(string sortBy, string? direction)
+    private static SnippetSortBy ParseSortBy(string? sortBy)
+    {
+        var normalized = sortBy?.Trim().ToLowerInvariant();
+
+        return normalized switch
+        {
+            "title" => SnippetSortBy.Title,
+            "viewcount" => SnippetSortBy.ViewCount,
+            "updatedat" => SnippetSortBy.UpdatedAt,
+            _ => SnippetSortBy.CreatedAt
+        };
+    }
+
+    private static SnippetStatus ParseStatus(string? status)
+    {
+        var normalized = status?.Trim().ToLowerInvariant();
+
+        return normalized switch
+        {
+            null or "" or "all" => SnippetStatus.All,
+            "active" => SnippetStatus.Active,
+            "expired" => SnippetStatus.Expired,
+            _ => throw new ValidationException(
+                "Invalid status filter.",
+                new Dictionary<string, string[]>
+                {
+                    ["status"] = ["Must be one of: active, expired, all."]
+                })
+        };
+    }
+
+    private static bool ResolveDescending(
+        SnippetSortBy sortBy,
+        string? direction)
     {
         var explicitDirection = direction?.Trim().ToLowerInvariant();
 
@@ -236,124 +235,47 @@ public sealed class SnippetService : ISnippetService
         if (explicitDirection is not null)
             return explicitDirection == "desc";
 
-        return sortBy is not "title";
+        return sortBy is not SnippetSortBy.Title;
     }
 
-    private static IQueryable<TextSnippet> ApplyOrdering(
-        IQueryable<TextSnippet> source,
-        string sortBy,
-        bool descending)
+    private static Keyset? ParseCursor(string? cursor, SnippetSortBy sortBy)
     {
+        if (string.IsNullOrWhiteSpace(cursor))
+            return null;
+
         return sortBy switch
         {
-            "title" => descending
-                ? source.OrderByDescending(s => s.Title ?? "")
-                : source.OrderBy(s => s.Title ?? ""),
-            "viewcount" => descending
-                ? source.OrderByDescending(s => s.ViewCount)
-                    .ThenByDescending(s => s.Id)
-                : source.OrderBy(s => s.ViewCount)
-                    .ThenBy(s => s.Id),
-            "updatedat" => descending
-                ? source.OrderByDescending(s => s.UpdatedAtUtc)
-                    .ThenByDescending(s => s.Id)
-                : source.OrderBy(s => s.UpdatedAtUtc)
-                    .ThenBy(s => s.Id),
-            "createdat" or _ => descending
-                ? source.OrderByDescending(s => s.CreatedAtUtc)
-                    .ThenByDescending(s => s.Id)
-                : source.OrderBy(s => s.CreatedAtUtc)
-                    .ThenBy(s => s.Id)
+            SnippetSortBy.Title => ParseStringCursor(cursor),
+            SnippetSortBy.ViewCount => ParseNumberCursor(cursor),
+            _ => ParseDateCursor(cursor)
         };
     }
 
-    private static IQueryable<TextSnippet> ApplyCursor(
-        IQueryable<TextSnippet> source,
-        string sortBy,
-        string cursor,
-        bool descending)
+    private static Keyset ParseStringCursor(string cursor)
     {
-        switch (sortBy)
-        {
-            case "title":
-            {
-                if (!Cursor.TryDecodeString(cursor, out var lastTitle, out var lastId))
-                    throw InvalidCursor();
+        if (!Cursor.TryDecodeString(cursor, out var lastTitle, out var lastId))
+            throw InvalidCursor();
 
-                return descending
-                    ? source.Where(s =>
-                        (s.Title ?? "").CompareTo(lastTitle) < 0 ||
-                        ((s.Title ?? "") == lastTitle && s.Id.CompareTo(lastId) < 0))
-                    : source.Where(s =>
-                        (s.Title ?? "").CompareTo(lastTitle) > 0 ||
-                        ((s.Title ?? "") == lastTitle && s.Id.CompareTo(lastId) > 0));
-            }
-
-            case "viewcount":
-            {
-                if (!Cursor.TryDecodeString(cursor, out var raw, out var lastId) ||
-                    !long.TryParse(raw, out var lastValue))
-                {
-                    throw InvalidCursor();
-                }
-
-                return descending
-                    ? source.Where(s =>
-                        s.ViewCount < lastValue ||
-                        (s.ViewCount == lastValue && s.Id.CompareTo(lastId) < 0))
-                    : source.Where(s =>
-                        s.ViewCount > lastValue ||
-                        (s.ViewCount == lastValue && s.Id.CompareTo(lastId) > 0));
-            }
-
-            case "updatedat":
-            {
-                if (!TryDecodeTicks(cursor, out var lastValue, out var lastId))
-                    throw InvalidCursor();
-
-                return descending
-                    ? source.Where(s =>
-                        s.UpdatedAtUtc < lastValue ||
-                        (s.UpdatedAtUtc == lastValue && s.Id.CompareTo(lastId) < 0))
-                    : source.Where(s =>
-                        s.UpdatedAtUtc > lastValue ||
-                        (s.UpdatedAtUtc == lastValue && s.Id.CompareTo(lastId) > 0));
-            }
-
-            default:
-            {
-                if (!TryDecodeTicks(cursor, out var lastValue, out var lastId))
-                    throw InvalidCursor();
-
-                return descending
-                    ? source.Where(s =>
-                        s.CreatedAtUtc < lastValue ||
-                        (s.CreatedAtUtc == lastValue && s.Id.CompareTo(lastId) < 0))
-                    : source.Where(s =>
-                        s.CreatedAtUtc > lastValue ||
-                        (s.CreatedAtUtc == lastValue && s.Id.CompareTo(lastId) > 0));
-            }
-        }
+        return new StringKeyset(lastTitle, lastId);
     }
 
-    private static bool TryDecodeTicks(
-        string cursor,
-        out DateTime value,
-        out Guid id)
+    private static Keyset ParseNumberCursor(string cursor)
     {
-        value = default;
-        id = default;
-
-        if (!Cursor.TryDecodeString(cursor, out var raw, out id) ||
-            !long.TryParse(raw, out var ticks) ||
-            ticks < DateTime.MinValue.Ticks ||
-            ticks > DateTime.MaxValue.Ticks)
+        if (!Cursor.TryDecodeString(cursor, out var raw, out var lastId) ||
+            !long.TryParse(raw, out var lastValue))
         {
-            return false;
+            throw InvalidCursor();
         }
 
-        value = new DateTime(ticks, DateTimeKind.Utc);
-        return true;
+        return new NumberKeyset(lastValue, lastId);
+    }
+
+    private static Keyset ParseDateCursor(string cursor)
+    {
+        if (!Cursor.TryDecodeDateTime(cursor, out var lastValue, out var lastId))
+            throw InvalidCursor();
+
+        return new DateKeyset(lastValue, lastId);
     }
 
     private static ValidationException InvalidCursor()

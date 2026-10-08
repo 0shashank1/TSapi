@@ -1,24 +1,28 @@
-using Microsoft.EntityFrameworkCore;
 using TS.Application.Common;
 using TS.Application.DTOs.ShareLinks;
 using TS.Application.Interfaces;
 using TS.Domain.Entities;
-using TS.Infrastructure.Persistence;
 
 namespace TS.Infrastructure.Services;
 
 public sealed class ShareLinkService : IShareLinkService
 {
-    private readonly TSDbContext _db;
+    private readonly ISnippetRepository _snippets;
+    private readonly IShareLinkRepository _shareLinks;
+    private readonly IUnitOfWork _unitOfWork;
     private readonly IShareCodeService _shareCodeService;
     private readonly IPasswordHasher _passwordHasher;
 
     public ShareLinkService(
-        TSDbContext db,
+        ISnippetRepository snippets,
+        IShareLinkRepository shareLinks,
+        IUnitOfWork unitOfWork,
         IShareCodeService shareCodeService,
         IPasswordHasher passwordHasher)
     {
-        _db = db;
+        _snippets = snippets;
+        _shareLinks = shareLinks;
+        _unitOfWork = unitOfWork;
         _shareCodeService = shareCodeService;
         _passwordHasher = passwordHasher;
     }
@@ -30,8 +34,7 @@ public sealed class ShareLinkService : IShareLinkService
         string baseUrl,
         CancellationToken cancellationToken = default)
     {
-        var snippet = await _db.TextSnippets
-            .FirstOrDefaultAsync(s => s.Id == snippetId, cancellationToken);
+        var snippet = await _snippets.GetByIdAsync(snippetId, cancellationToken);
 
         EnsureCanAccess(context, snippet);
 
@@ -61,8 +64,8 @@ public sealed class ShareLinkService : IShareLinkService
             request.ExpiresAtUtc,
             request.MaxUses);
 
-        _db.ShareLinks.Add(link);
-        await _db.SaveChangesAsync(cancellationToken);
+        _shareLinks.Add(link);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         var url = $"{baseUrl.TrimEnd('/')}/s/{code}";
 
@@ -76,9 +79,9 @@ public sealed class ShareLinkService : IShareLinkService
         string? cursor,
         CancellationToken cancellationToken = default)
     {
-        var snippet = await _db.TextSnippets
-            .AsNoTracking()
-            .FirstOrDefaultAsync(s => s.Id == snippetId, cancellationToken);
+        var snippet = await _snippets.GetByIdAsNoTrackingAsync(
+            snippetId,
+            cancellationToken);
 
         EnsureCanAccess(context, snippet);
 
@@ -92,15 +95,10 @@ public sealed class ShareLinkService : IShareLinkService
                 });
         }
 
-        IQueryable<ShareLink> source = _db.ShareLinks.AsNoTracking()
-            .Where(l => l.TextSnippetId == snippetId);
-
+        DateKeyset? keyset = null;
         if (!string.IsNullOrWhiteSpace(cursor))
         {
-            if (!Cursor.TryDecodeString(cursor, out var rawTicks, out var lastId) ||
-                !long.TryParse(rawTicks, out var ticks) ||
-                ticks < DateTime.MinValue.Ticks ||
-                ticks > DateTime.MaxValue.Ticks)
+            if (!Cursor.TryDecodeDateTime(cursor, out var lastCreatedAt, out var lastId))
             {
                 throw new ValidationException(
                     "Invalid cursor.",
@@ -110,17 +108,14 @@ public sealed class ShareLinkService : IShareLinkService
                     });
             }
 
-            var lastCreatedAt = new DateTime(ticks, DateTimeKind.Utc);
-            source = source.Where(l =>
-                l.CreatedAtUtc < lastCreatedAt ||
-                (l.CreatedAtUtc == lastCreatedAt && l.Id.CompareTo(lastId) < 0));
+            keyset = new DateKeyset(lastCreatedAt, lastId);
         }
 
-        var rows = await source
-            .OrderByDescending(l => l.CreatedAtUtc)
-            .ThenByDescending(l => l.Id)
-            .Take(pageSize + 1)
-            .ToListAsync(cancellationToken);
+        var rows = await _shareLinks.ListBySnippetAsync(
+            snippetId,
+            keyset,
+            pageSize + 1,
+            cancellationToken);
 
         var hasMore = rows.Count > pageSize;
         if (hasMore)
@@ -175,7 +170,7 @@ public sealed class ShareLinkService : IShareLinkService
         }
 
         link.UpdatePolicy(expiresAtUtc, maxUses, DateTime.UtcNow);
-        await _db.SaveChangesAsync(cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         return ShareLinkResponse.From(link);
     }
@@ -188,7 +183,7 @@ public sealed class ShareLinkService : IShareLinkService
         var link = await FindOwnedAsync(context, linkId, cancellationToken);
 
         link.Revoke(DateTime.UtcNow);
-        await _db.SaveChangesAsync(cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
     }
 
     private const int SnippetPageSizeMax = 100;
@@ -198,9 +193,7 @@ public sealed class ShareLinkService : IShareLinkService
         Guid linkId,
         CancellationToken cancellationToken)
     {
-        var link = await _db.ShareLinks
-            .Include(l => l.TextSnippet)
-            .FirstOrDefaultAsync(l => l.Id == linkId, cancellationToken);
+        var link = await _shareLinks.FindWithSnippetAsync(linkId, cancellationToken);
 
         if (link is null)
             throw new NotFoundException("Share link not found.");
