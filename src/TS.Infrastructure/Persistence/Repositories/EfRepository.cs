@@ -68,4 +68,27 @@ public class EfRepository<TEntity>(TSDbContext dbContext) : IRepository<TEntity>
 
     public virtual void Remove(TEntity entity)
         => DbSet.Remove(entity);
+
+    /// <summary>
+    /// Set-based delete of at most <paramref name="limit"/> matching rows —
+    /// no entities are materialized, and cascades are left to the database.
+    /// Returns the number of rows removed.
+    /// </summary>
+    protected async Task<int> DeleteBatchAsync(
+        IQueryable<TEntity> matches,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        var ids = await matches
+            .Take(limit)
+            .Select(entity => entity.Id)
+            .ToListAsync(cancellationToken);
+
+        if (ids.Count == 0)
+            return 0;
+
+        return await DbSet
+            .Where(entity => ids.Contains(entity.Id))
+            .ExecuteDeleteAsync(cancellationToken);
+    }
 }

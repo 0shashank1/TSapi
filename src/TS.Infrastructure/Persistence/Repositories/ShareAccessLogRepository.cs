@@ -54,4 +54,13 @@ public sealed class ShareAccessLogRepository(TSDbContext dbContext)
             .Take(limit)
             .ToListAsync(cancellationToken);
     }
+
+    public Task<int> PurgeOlderThanAsync(
+        DateTime accessedBeforeUtc,
+        int limit,
+        CancellationToken cancellationToken = default)
+        => DeleteBatchAsync(
+            DbSet.Where(l => l.AccessedAtUtc <= accessedBeforeUtc),
+            limit,
+            cancellationToken);
 }

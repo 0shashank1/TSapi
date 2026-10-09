@@ -49,4 +49,15 @@ public sealed class ShareLinkRepository(TSDbContext dbContext)
             .Take(limit)
             .ToListAsync(cancellationToken);
     }
+
+    public Task<int> PurgeExpiredAsync(
+        DateTime expiredBeforeUtc,
+        int limit,
+        CancellationToken cancellationToken = default)
+        => DeleteBatchAsync(
+            DbSet.Where(l =>
+                (l.ExpiresAtUtc != null && l.ExpiresAtUtc <= expiredBeforeUtc) ||
+                (l.RevokedAtUtc != null && l.RevokedAtUtc <= expiredBeforeUtc)),
+            limit,
+            cancellationToken);
 }

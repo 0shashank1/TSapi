@@ -13,4 +13,14 @@ public interface IShareAccessLogRepository : IRepository<ShareAccessLog>
         DateKeyset? cursor,
         int limit,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Removes audit rows accessed at or before
+    /// <paramref name="accessedBeforeUtc"/>, at most
+    /// <paramref name="limit"/> per call.
+    /// </summary>
+    Task<int> PurgeOlderThanAsync(
+        DateTime accessedBeforeUtc,
+        int limit,
+        CancellationToken cancellationToken = default);
 }

@@ -21,4 +21,15 @@ public interface IShareLinkRepository : IRepository<ShareLink>
         DateKeyset? cursor,
         int limit,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Removes links that expired or were revoked at or before
+    /// <paramref name="expiredBeforeUtc"/>, at most
+    /// <paramref name="limit"/> per call. Access logs keep their history
+    /// (the foreign key is set to null by the database).
+    /// </summary>
+    Task<int> PurgeExpiredAsync(
+        DateTime expiredBeforeUtc,
+        int limit,
+        CancellationToken cancellationToken = default);
 }
