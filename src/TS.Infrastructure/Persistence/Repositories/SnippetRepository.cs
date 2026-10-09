@@ -53,6 +53,16 @@ public sealed class SnippetRepository(TSDbContext dbContext)
         => DbSet.AsNoTracking()
             .CountAsync(s => s.OwnerUserId == ownerId, cancellationToken);
 
+    public Task<int> PurgeExpiredAsync(
+        DateTime expiredBeforeUtc,
+        int limit,
+        CancellationToken cancellationToken = default)
+        => DeleteBatchAsync(
+            DbSet.Where(s =>
+                s.ExpiresAtUtc != null && s.ExpiresAtUtc <= expiredBeforeUtc),
+            limit,
+            cancellationToken);
+
     private static IQueryable<TextSnippet> ApplyCursor(
         IQueryable<TextSnippet> source,
         SnippetSortBy sortBy,

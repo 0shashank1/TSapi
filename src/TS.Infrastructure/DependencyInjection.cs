@@ -2,6 +2,7 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using TS.Application.Interfaces;
+using TS.Infrastructure.BackgroundJobs;
 using TS.Infrastructure.Persistence;
 using TS.Infrastructure.Persistence.Repositories;
 using TS.Infrastructure.Security;
@@ -45,6 +46,10 @@ public static class DependencyInjection
         services.AddScoped<IShareLinkService, ShareLinkService>();
         services.AddScoped<IPublicShareService, PublicShareService>();
         services.AddScoped<IAdminService, AdminService>();
+
+        services.Configure<CleanupOptions>(
+            configuration.GetSection(CleanupOptions.SectionName));
+        services.AddHostedService<ExpiredContentCleanupService>();
 
         return services;
     }

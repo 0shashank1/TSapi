@@ -34,4 +34,14 @@ public interface IRefreshTokenRepository : IRepository<RefreshToken>
         DateKeyset? cursor,
         int limit,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Removes tokens whose <c>ExpiresAtUtc</c> is at or before
+    /// <paramref name="expiredBeforeUtc"/>, at most
+    /// <paramref name="limit"/> per call.
+    /// </summary>
+    Task<int> PurgeExpiredAsync(
+        DateTime expiredBeforeUtc,
+        int limit,
+        CancellationToken cancellationToken = default);
 }

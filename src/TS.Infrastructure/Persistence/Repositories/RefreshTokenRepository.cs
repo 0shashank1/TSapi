@@ -85,4 +85,13 @@ public sealed class RefreshTokenRepository(TSDbContext dbContext)
             .Take(limit)
             .ToListAsync(cancellationToken);
     }
+
+    public Task<int> PurgeExpiredAsync(
+        DateTime expiredBeforeUtc,
+        int limit,
+        CancellationToken cancellationToken = default)
+        => DeleteBatchAsync(
+            DbSet.Where(t => t.ExpiresAtUtc <= expiredBeforeUtc),
+            limit,
+            cancellationToken);
 }
